@@ -1,5 +1,5 @@
 # =====================================
-# 🌈 EtherSym Visual Replay — Modo Show
+# 🌈 EtherSym Visual Replay — Pontuação por Cano (HUD Funcional)
 # =====================================
 
 import sys, re, json, pygame, torch, numpy as np
@@ -10,49 +10,48 @@ from physics.flappy_env import AmbienteFlappy
 from network import criar_modelo
 
 # =====================================
-# 📂 Utilidades
+# 📂 Persistência do Max Score
 # =====================================
 SAVE_PATH = Path("estado_treinamento.pth")
 MAX_SCORE_PATH = Path("max_score.json")
 
-def salvar_max_score(valor):
+def salvar_max_score(path, valor):
     try:
-        with open(MAX_SCORE_PATH, "w") as f:
+        with open(path, "w") as f:
             json.dump({"max_score": valor}, f)
     except Exception as e:
         print(f"⚠️ Erro ao salvar max_score: {e}")
 
-def carregar_max_score():
-    if MAX_SCORE_PATH.exists():
+def carregar_max_score(path):
+    if Path(path).exists():
         try:
-            return json.load(open(MAX_SCORE_PATH)).get("max_score", -9999)
+            return json.load(open(path)).get("max_score", 0)
         except Exception:
             pass
-    return -9999
+    return 0
 
 # =====================================
-# 🎬 Inicialização visual
+# 🎬 Inicialização
 # =====================================
 pygame.init()
 TELA = pygame.display.set_mode((LARGURA, ALTURA))
-pygame.display.set_caption("🌠 EtherSym — Agente em Ação")
+pygame.display.set_caption("🌠 EtherSym — Pontuação por Cano")
 clock = pygame.time.Clock()
-font_big = pygame.font.SysFont("Consolas", 28, bold=True)
-font_small = pygame.font.SysFont("Consolas", 16)
+font_big = pygame.font.SysFont("Consolas", 36, bold=True)
+font_small = pygame.font.SysFont("Consolas", 20)
 
-# paleta divertida
 CORES = {
     "fundo": (10, 10, 20),
     "hud": (255, 255, 255),
-    "brilho": (0, 180, 255),
-    "particula": (255, 255, 120)
+    "max": (255, 255, 120),
+    "atual": (80, 200, 255),
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_float32_matmul_precision("high")
 
 # =====================================
-# 🧠 Modelo treinado
+# 🧠 Modelo
 # =====================================
 modelo, _, _, _ = criar_modelo(device)
 try:
@@ -68,43 +67,29 @@ except Exception as e:
     sys.exit(1)
 
 # =====================================
-# 🌌 Ambiente e funções
+# 🌌 Ambiente
 # =====================================
 campo = GravidadeAstrofisica()
 env = AmbienteFlappy()
 ACTIONS = np.array([-1, 0, 1], dtype=np.int8)
 
+@torch.no_grad()
 def escolher_acao_argmax(estado):
     x = torch.tensor(estado, dtype=torch.float32, device=device).unsqueeze(0)
     q_vals = modelo(x)
     return ACTIONS[int(torch.argmax(q_vals, dim=1))]
 
 # =====================================
-# 💫 Sistema de partículas para diversão
-# =====================================
-particulas = []
-def adicionar_particula(x, y):
-    particulas.append([x, y, np.random.uniform(-2, 2), np.random.uniform(-4, -1), np.random.randint(3, 6)])
-
-def atualizar_particulas():
-    for p in particulas[:]:
-        p[0] += p[2]
-        p[1] += p[3]
-        p[4] -= 0.15
-        if p[4] <= 0:
-            particulas.remove(p)
-        else:
-            pygame.draw.circle(TELA, CORES["particula"], (int(p[0]), int(p[1])), int(p[4]))
-
-# =====================================
-# 🕹️ Execução pura e divertida
+# 🕹️ Loop Principal
 # =====================================
 estado = env.reset()
-episodio, total_recompensa, melhor = 0, 0.0, carregar_max_score()
 FPS_REAL = 60
-brilho = 0
 
-print("🎮 Iniciando modo visual... Divirta-se!")
+# usa pontuação do ambiente diretamente
+pontuacao = env.pontuacao
+melhor = carregar_max_score(env.max_score_path)
+
+print(f"🎮 Modo Show iniciado — Max Score atual: {melhor}")
 
 while True:
     for e in pygame.event.get():
@@ -112,43 +97,34 @@ while True:
             pygame.quit()
             sys.exit(0)
 
-    # === Ação ===
+    # === Passo da IA ===
     acao = escolher_acao_argmax(estado)
     novo_estado, recompensa, terminado = env.step(acao, campo)
-    total_recompensa += recompensa
     estado = novo_estado
+
+    # === Atualiza pontuação e recorde ===
+    pontuacao = env.pontuacao
+    if pontuacao > melhor:
+        melhor = pontuacao
+        salvar_max_score(env.max_score_path, melhor)
+        print(f"🌟 Novo recorde! {melhor}")
 
     # === Renderização ===
     TELA.fill(CORES["fundo"])
     env.render(campo)
 
-    # partículas simbólicas de energia
-    if np.random.random() < 0.4:
-        adicionar_particula(200 + np.random.randint(-60, 60), 300 + np.random.randint(-50, 50))
-    atualizar_particulas()
+    # HUD fixo
+    pygame.draw.rect(TELA, (0, 0, 0, 100), (0, 0, LARGURA, 60))
+    texto_max = font_small.render(f"🌟 MAX: {int(melhor)}", True, CORES["max"])
+    texto_atual = font_big.render(f"🏆 {int(pontuacao)}", True, CORES["atual"])
+    TELA.blit(texto_max, (10, 5))
+    TELA.blit(texto_atual, (10, 25))
 
-    # brilho pulsante
-    brilho = (brilho + 4) % 360
-    cor_brilho = (
-        int(128 + 127 * np.sin(np.radians(brilho))),
-        int(128 + 127 * np.sin(np.radians(brilho + 120))),
-        int(128 + 127 * np.sin(np.radians(brilho + 240))),
-    )
-
-    # HUD principal
-    texto1 = f"Ep {episodio:04d} | Reward={total_recompensa:7.1f} | Melhor={melhor:7.1f}"
-    pygame.draw.rect(TELA, (0, 0, 0, 100), (0, 0, LARGURA, 40))
-    TELA.blit(font_small.render(texto1, True, CORES["hud"]), (10, 10))
-
-    pygame.draw.circle(TELA, cor_brilho, (LARGURA - 80, 30), 12)
     pygame.display.flip()
     clock.tick(FPS_REAL)
 
     # === Episódio concluído ===
     if terminado:
-        melhor = max(melhor, total_recompensa)
-        salvar_max_score(float(melhor))
-        print(f"🏁 Ep {episodio:04d} — Reward={total_recompensa:.1f} | Melhor={melhor:.1f}")
+        print(f"🏁 Fim | Pontuação={pontuacao} | Recorde={melhor}")
         estado = env.reset()
-        total_recompensa = 0.0
-        episodio += 1
+        pontuacao = 0
