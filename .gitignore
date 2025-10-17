@@ -1,5 +1,5 @@
 echo "__pycache__/
-*.pth
+
 *.pyc
 *.log
 .env
