@@ -3,6 +3,16 @@ from config import *
 from field import GravidadeAstrofisica
 from physics.flappy_env import AmbienteFlappy
 from network import criar_modelo
+import json
+from pathlib import Path
+
+MAX_SCORE_PATH = Path("max_score.json")
+
+def salvar_max_score(valor):
+    try:
+        json.dump({"max_score": valor}, open(MAX_SCORE_PATH, "w"))
+    except Exception as e:
+        print(f"⚠️ Erro ao salvar max_score: {e}")
 
 # =====================================
 # 🎬 Inicialização
@@ -76,6 +86,8 @@ while True:
 
     if terminado:
         melhor = max(melhor, total_recompensa)
+        salvar_max_score(float(melhor))
+
         print(f"🏁 Ep {episodio:04d} — Reward={total_recompensa:.1f} | Melhor={melhor:.1f}")
         estado = env.reset()
         total_recompensa = 0.0
