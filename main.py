@@ -1,62 +1,70 @@
-# ==========================================
-# 🌌 EtherSym v9 — Gravidade Astrofísica e Neurogênese Simbiótica
-# Versão estável (com borda, sem flicker, encerramento limpo)
-# ==========================================
-
-import pygame, sys, random, torch, numpy as np
-from collections import deque
+import sys, random, pygame, numpy as np, torch
+from torch.amp import GradScaler     # ✅ NOVA API — substitui torch.cuda.amp
+from torch.amp import autocast       # idem
 
 from config import *
 from utils import reseed, warmup
 from field import GravidadeAstrofisica
-from network import criar_modelo
 from physics.flappy_env import AmbienteFlappy
 from memory import salvar_estado, carregar_estado
+from network import criar_modelo
+from replay import RingReplay, NStepBuffer
 
 # ========================
-# Inicialização da Janela
+# Inicialização de janela
 # ========================
 pygame.init()
 pygame.font.init()
-
-# Flags seguras e suaves (sem NOFRAME)
 DISPLAY_FLAGS = pygame.DOUBLEBUF | pygame.HWSURFACE | pygame.SCALED
-
-# VSync melhora a estabilidade (quando suportado)
 try:
     TELA = pygame.display.set_mode((LARGURA, ALTURA), DISPLAY_FLAGS, vsync=1)
-except TypeError:
+except Exception:
     TELA = pygame.display.set_mode((LARGURA, ALTURA), DISPLAY_FLAGS)
-
-pygame.display.set_caption("🌌 EtherSym v9 — Gravidade Astrofísica e Neurogênese Simbiótica")
+pygame.display.set_caption("🌌 EtherSym v9 — Turbo Dueling DQN")
 clock = pygame.time.Clock()
+pygame.event.set_allowed([pygame.QUIT, pygame.KEYDOWN, pygame.KEYUP])
 
 # ========================
-# Modelo e Memória
+# Modelo e memória
 # ========================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-modelo, alvo, otimizador, loss_fn = criar_modelo(device)
-memoria, EPSILON, media_recompensa = carregar_estado(modelo, otimizador)
+modelo, alvo, opt, loss_fn = criar_modelo(device)
+alvo.eval()
+modelo.train(True)
+
+# torch.compile (fallback se não disponível)
+try:
+    if device.type == "cuda":
+        modelo = torch.compile(modelo, mode="max-autotune")
+        alvo   = torch.compile(alvo,   mode="max-autotune")
+except Exception:
+    pass
+
+# ✅ usa nova API do GradScaler
+scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
+
+try:
+    torch.set_float32_matmul_precision("high")
+except Exception:
+    pass
+
+# tenta carregar estado anterior (mantém compat)
+_legacy_mem, EPSILON, media_recompensa = carregar_estado(modelo, opt)
+if EPSILON is None:
+    EPSILON = EPSILON_INICIAL
+
+# cria novo buffer tensorizado
+replay = RingReplay(state_dim=6, capacity=MEMORIA_MAX, device=device)
 
 campo = GravidadeAstrofisica()
 env   = AmbienteFlappy()
 
-# ========================
-# Hiperparâmetros
-# ========================
 ACTIONS = np.array([-1, 0, 1], dtype=np.int8)
+def a_to_index(a): return int(a + 1)
+
+# escolha de ação
 TEMPERATURA_BASE = 0.95
 TEMPERATURA_MIN  = 0.60
-TARGET_TAU       = 0.02
-TARGET_SYNC_HARD = 2000
-AUTOSAVE_EVERY   = 2000
-MIN_REPLAY       = max(BATCH * 5, 1000)
-global_step      = 0
-hard_sync_step   = 0
-
-# ========================
-# Escolha de ação (ε-greedy + softmax)
-# ========================
 def escolher_acao(estado):
     global EPSILON
     if random.random() < EPSILON:
@@ -69,13 +77,18 @@ def escolher_acao(estado):
         probs = (probs / probs.sum(dim=1, keepdim=True)).cpu().numpy().ravel()
         return int(np.random.choice(ACTIONS, p=probs))
 
-# ========================
-# Atualização suave (Polyak)
-# ========================
 @torch.no_grad()
-def soft_update(alvo, online, tau=TARGET_TAU):
-    for p_t, p in zip(alvo.parameters(), online.parameters()):
+def soft_update(alvo_m, online_m, tau=TARGET_TAU):
+    for p_t, p in zip(alvo_m.parameters(), online_m.parameters()):
         p_t.data.mul_(1.0 - tau).add_(tau * p.data)
+
+def step_repetido(env, acao, campo, repeats=ACTION_REPEAT):
+    total_r, s, done = 0.0, None, False
+    for _ in range(max(1, repeats)):
+        s, r, done = env.step(acao, campo)
+        total_r += r
+        if done: break
+    return s, float(total_r), done
 
 # ========================
 # Loop principal
@@ -83,96 +96,104 @@ def soft_update(alvo, online, tau=TARGET_TAU):
 estado = warmup(env, campo)
 total_recompensa = 0.0
 epoch = 0
-recompensas = deque(maxlen=120)
+recompensas = []
+global_step = 0
+hard_sync_step = 0
+nstep_helper = NStepBuffer(N_STEP, GAMMA)
+running = True
 
-pygame.event.set_allowed([pygame.QUIT, pygame.KEYDOWN, pygame.KEYUP])
-
-while True:
-    # === Eventos ===
+while running:
     for e in pygame.event.get():
         if e.type == pygame.QUIT:
-            print("🛑 Encerrando simulação EtherSym...")
-            # limpa a tela antes de sair (evita embaçado)
-            TELA.fill((0, 0, 0))
-            pygame.display.flip()
-            salvar_estado(modelo, otimizador, memoria, EPSILON, media_recompensa)
-            pygame.time.delay(150)
-            pygame.quit()
-            sys.exit()
+            running = False
 
-    # === Passo simbiótico ===
-    acao = escolher_acao(estado)
-    novo_estado, recompensa, terminado = env.step(acao, campo)
+    # ===== Coleta acelerada =====
+    for _ in range(max(1, STEPS_PER_RENDER)):
+        acao = escolher_acao(estado)
+        novo_estado, recompensa, terminado = step_repetido(env, acao, campo, repeats=ACTION_REPEAT)
+        recompensa = float(np.clip(recompensa, -300.0, 50.0))
 
-    recompensa = float(np.clip(recompensa, -300.0, 50.0))
-    memoria.append((estado, acao, recompensa, novo_estado, terminado))
-    total_recompensa += recompensa
-    estado = novo_estado
-    global_step += 1
-    hard_sync_step += 1
+        nstep_helper.push(estado, acao, recompensa)
+        flush = (len(nstep_helper.traj) == N_STEP) or terminado
+        if flush:
+            item = nstep_helper.flush(novo_estado, terminado)
+            if item is not None:
+                s0, a0, Rn, s_n, done_n = item
+                replay.append(s0, a_to_index(a0), Rn, s_n, float(done_n))
 
-    # === Treinamento ===
-    if len(memoria) >= MIN_REPLAY:
-        lote = random.sample(memoria, BATCH)
-        estados, acoes, recompensas_lote, novos_estados, finais = zip(*lote)
+        total_recompensa += recompensa
+        estado = novo_estado
+        global_step += 1
+        hard_sync_step += 1
 
-        estados_t       = torch.tensor(np.asarray(estados, dtype=np.float32), device=device)
-        novos_estados_t = torch.tensor(np.asarray(novos_estados, dtype=np.float32), device=device)
-        acoes_t         = torch.tensor(np.asarray(acoes, dtype=np.int64), device=device).unsqueeze(1)
-        recompensas_t   = torch.tensor(np.asarray(recompensas_lote, dtype=np.float32), device=device)
-        finais_t        = torch.tensor(np.asarray(finais, dtype=np.float32), device=device)
+        # ===== Treinamento =====
+        if len(replay) >= MIN_REPLAY:
+            estados_t, acoes_t, recompensas_t, novos_estados_t, finais_t = replay.sample(BATCH)
+            with torch.no_grad():
+                next_online_q = modelo(novos_estados_t)
+                next_actions  = torch.argmax(next_online_q, dim=1)
+                next_target_q = alvo(novos_estados_t).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+                alvo_q        = recompensas_t + (GAMMA ** N_STEP) * next_target_q * (1.0 - finais_t)
 
-        idx_t = acoes_t + 1
+            opt.zero_grad(set_to_none=True)
+            with autocast("cuda", enabled=(device.type == "cuda")):
+                q_vals = modelo(estados_t).gather(1, acoes_t).squeeze(1)
+                perda = loss_fn(q_vals, alvo_q)
 
-        with torch.no_grad():
-            next_online_q = modelo(novos_estados_t)
-            next_actions  = torch.argmax(next_online_q, dim=1)
-            next_target_q = alvo(novos_estados_t).gather(1, next_actions.unsqueeze(1)).squeeze(1)
-            alvo_q        = recompensas_t + GAMMA * next_target_q * (1.0 - finais_t)
+            scaler.scale(perda).backward()
+            torch.nn.utils.clip_grad_norm_(modelo.parameters(), 1.0)
+            scaler.step(opt)
+            scaler.update()
 
-        q_vals = modelo(estados_t).gather(1, idx_t).squeeze(1)
-        perda = loss_fn(q_vals, alvo_q)
-        otimizador.zero_grad(set_to_none=True)
-        perda.backward()
-        torch.nn.utils.clip_grad_norm_(modelo.parameters(), 1.0)
-        otimizador.step()
+            soft_update(alvo, modelo, tau=TARGET_TAU)
+            if hard_sync_step >= TARGET_SYNC_HARD:
+                alvo.load_state_dict(modelo.state_dict())
+                hard_sync_step = 0
 
-        soft_update(alvo, modelo, tau=TARGET_TAU)
-        if hard_sync_step >= TARGET_SYNC_HARD:
-            alvo.load_state_dict(modelo.state_dict())
-            hard_sync_step = 0
+        if terminado:
+            recompensas.append(total_recompensa)
+            media_recompensa = float(np.mean(recompensas[-120:])) if len(recompensas) else 0.0
+            EPSILON = max(EPSILON * EPSILON_DECAY, EPSILON_MIN)
 
-    # === Autosave ===
-    if global_step % AUTOSAVE_EVERY == 0:
-        salvar_estado(modelo, otimizador, memoria, EPSILON, media_recompensa)
+            taxa_poda = 0.0
+            if epoch % 2 == 0:
+                taxa_poda = modelo.aplicar_poda(limiar_base=max(0.0005, 0.004 * (1 - EPSILON)))
+                modelo.regenerar_sinapses(taxa_poda)
 
-    # === Render estável ===
-    env.render(campo)            # draw apenas
-    pygame.display.flip()        # flip único global
-    clock.tick(240)               # limite seguro de FPS
+            try:
+                modelo.verificar_homeostase(media_recompensa)
+            except AttributeError:
+                pass
 
-    # === Fim do episódio ===
-    if terminado:
-        recompensas.append(total_recompensa)
-        media_recompensa = float(np.mean(recompensas)) if len(recompensas) else 0.0
-        EPSILON = max(EPSILON * EPSILON_DECAY, EPSILON_MIN)
+            if (epoch % max(1, LOG_INTERVAL // 5) == 0):
+                print(f"🧬 Epoch {epoch:04d} | Reward={total_recompensa:7.1f} | Média={media_recompensa:7.1f} "
+                      f"| EPS={EPSILON:.3f} | step={global_step} | Poda={taxa_poda*100:.2f}")
 
-        taxa_poda = modelo.aplicar_poda(limiar_base=max(0.0005, 0.004 * (1 - EPSILON)))
-        modelo.regenerar_sinapses(taxa_poda)
+            # ✅ corrige erro de NoneType — cria buffer vazio se não existir
+            dummy_mem = []
+            salvar_estado(modelo, opt, dummy_mem, EPSILON, media_recompensa)
 
-        try:
-            modelo.verificar_homeostase(media_recompensa)
-        except AttributeError:
-            pass
+            reseed()
+            estado = env.reset()
+            total_recompensa = 0.0
+            epoch += 1
 
-        salvar_estado(modelo, otimizador, memoria, EPSILON, media_recompensa)
+    # ===== Renderização =====
+    if not FAST_MODE:
+        if RENDER_INTERVAL <= 1:
+            env.render(campo); pygame.display.flip(); clock.tick(FPS)
+        elif (global_step % RENDER_INTERVAL) == 0:
+            env.render(campo); pygame.display.flip()
+    else:
+        if RENDER_INTERVAL > 0 and (global_step % RENDER_INTERVAL) == 0:
+            env.render(campo); pygame.display.flip()
 
-        print(
-            f"🧬 Epoch {epoch:04d} | Reward={total_recompensa:7.1f} | Média={media_recompensa:7.1f} "
-            f"| EPS={EPSILON:.3f} | Poda={taxa_poda*100:.2f}% | step={global_step}"
-        )
-
-        reseed()
-        estado = env.reset()
-        total_recompensa = 0.0
-        epoch += 1
+# encerramento limpo
+try:
+    TELA.fill((0, 0, 0)); pygame.display.flip()
+except Exception:
+    pass
+salvar_estado(modelo, opt, [], EPSILON, locals().get("media_recompensa", 0.0))
+pygame.time.delay(150)
+pygame.quit()
+sys.exit(0)
