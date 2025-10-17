@@ -15,19 +15,22 @@ from network import criar_modelo
 SAVE_PATH = Path("estado_treinamento.pth")
 MAX_SCORE_PATH = Path("max_score.json")
 
-def salvar_max_score(path, valor):
+def salvar_max_score(valor):
     try:
-        with open(path, "w") as f:
+        with open(MAX_SCORE_PATH, "w") as f:
             json.dump({"max_score": valor}, f)
     except Exception as e:
         print(f"⚠️ Erro ao salvar max_score: {e}")
 
-def carregar_max_score(path):
-    if Path(path).exists():
+def carregar_max_score():
+    if MAX_SCORE_PATH.exists():
         try:
-            return json.load(open(path)).get("max_score", 0)
-        except Exception:
-            pass
+            data = json.load(open(MAX_SCORE_PATH))
+            return data.get("max_score", 0)
+        except Exception as e:
+            print(f"⚠️ Erro ao ler max_score: {e}")
+    # cria arquivo se não existir
+    salvar_max_score(0)
     return 0
 
 # =====================================
@@ -42,7 +45,6 @@ font_small = pygame.font.SysFont("Consolas", 20)
 
 CORES = {
     "fundo": (10, 10, 20),
-    "hud": (255, 255, 255),
     "max": (255, 255, 120),
     "atual": (80, 200, 255),
 }
@@ -85,9 +87,8 @@ def escolher_acao_argmax(estado):
 estado = env.reset()
 FPS_REAL = 60
 
-# usa pontuação do ambiente diretamente
-pontuacao = env.pontuacao
-melhor = carregar_max_score(env.max_score_path)
+pontuacao = 0
+melhor = carregar_max_score()
 
 print(f"🎮 Modo Show iniciado — Max Score atual: {melhor}")
 
@@ -102,11 +103,11 @@ while True:
     novo_estado, recompensa, terminado = env.step(acao, campo)
     estado = novo_estado
 
-    # === Atualiza pontuação e recorde ===
+    # === Atualiza pontuação ===
     pontuacao = env.pontuacao
     if pontuacao > melhor:
         melhor = pontuacao
-        salvar_max_score(env.max_score_path, melhor)
+        salvar_max_score(melhor)
         print(f"🌟 Novo recorde! {melhor}")
 
     # === Renderização ===
@@ -114,7 +115,6 @@ while True:
     env.render(campo)
 
     # HUD fixo
-    pygame.draw.rect(TELA, (0, 0, 0, 100), (0, 0, LARGURA, 60))
     texto_max = font_small.render(f"🌟 MAX: {int(melhor)}", True, CORES["max"])
     texto_atual = font_big.render(f"🏆 {int(pontuacao)}", True, CORES["atual"])
     TELA.blit(texto_max, (10, 5))
