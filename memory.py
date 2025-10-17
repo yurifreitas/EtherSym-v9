@@ -1,16 +1,29 @@
-import os, pickle, time, shutil
-import torch
+# ==========================================
+# 🧠 EtherSym Memory System — v9.7.1 (Evolutivo + Autorreparador)
+# ==========================================
+
+import os, pickle, time, shutil, torch
 from collections import deque
 from config import SAVE_PATH, MEMORIA_MAX, EPSILON_INICIAL
 
+# ------------------------------------------
+# 🔐 Salvamento seguro
+# ------------------------------------------
 def _safe_replace(tmp_path, final_path):
+    """Substitui um arquivo de forma atômica e sincronizada (sem risco de corrupção)."""
     os.replace(tmp_path, final_path)
     if hasattr(os, "sync"):
-        try: os.sync()
-        except: pass
+        try:
+            os.sync()
+        except:
+            pass
 
+
+# ------------------------------------------
+# 💾 Salvar estado principal
+# ------------------------------------------
 def salvar_estado(modelo, otimizador, memoria, epsilon, media_recompensa):
-    """Salva o estado completo de forma atômica (checkpoint principal)."""
+    """Salva o estado simbiótico completo (pesos, otimizador, epsilon, média, memória)."""
     data = {
         "modelo": modelo.state_dict(),
         "otimizador": otimizador.state_dict(),
@@ -26,15 +39,18 @@ def salvar_estado(modelo, otimizador, memoria, epsilon, media_recompensa):
     # — memória simbiótica .mem (atômico)
     tmp_mem = SAVE_PATH + ".mem.tmp"
     with open(tmp_mem, "wb") as f:
-        # garante tamanho máx
         lista = list(memoria)[-MEMORIA_MAX:] if memoria is not None else []
         pickle.dump(lista, f, protocol=pickle.HIGHEST_PROTOCOL)
     _safe_replace(tmp_mem, SAVE_PATH + ".mem")
 
     print(f"💾 Estado salvo: ε={epsilon:.3f} | média={media_recompensa:.2f} | memória={len(memoria) if memoria else 0}")
 
+
+# ------------------------------------------
+# 🧬 Salvar incremental (histórico evolutivo)
+# ------------------------------------------
 def salvar_estado_incremental(modelo, otimizador, memoria, epsilon, media_recompensa):
-    """Salva o estado + cria uma cópia versionada para histórico evolutivo."""
+    """Cria uma cópia versionada do estado (checkpoint evolutivo)."""
     salvar_estado(modelo, otimizador, memoria, epsilon, media_recompensa)
     base, ext = os.path.splitext(SAVE_PATH)
     stamp = int(time.time())
@@ -45,18 +61,20 @@ def salvar_estado_incremental(modelo, otimizador, memoria, epsilon, media_recomp
     except Exception as e:
         print(f"⚠️ Falha ao criar checkpoint evolutivo: {e}")
 
+
+# ------------------------------------------
+# 🔄 Carregar estado e regenerar se necessário
+# ------------------------------------------
 def carregar_estado(modelo, otimizador):
-    """Carrega o estado com tolerância a erros. Mescla memória existente."""
-    from collections import deque
+    """Carrega o estado simbiótico com tolerância a erros e regeneração automática."""
     memoria = deque(maxlen=MEMORIA_MAX)
     epsilon, media = EPSILON_INICIAL, 0.0
 
     if not os.path.exists(SAVE_PATH):
-        print("🆕 Nenhum estado anterior — iniciando do zero (evolutivo habilitado).")
+        print("🆕 Nenhum estado anterior — iniciando do zero (modo evolutivo ativo).")
         return memoria, epsilon, media
 
     try:
-        # PyTorch 2.6+: weights_only=False se o .pth tiver mais que pesos
         data = torch.load(SAVE_PATH, map_location="cpu", weights_only=False)
 
         if isinstance(data, dict):
@@ -65,12 +83,11 @@ def carregar_estado(modelo, otimizador):
             if "otimizador" in data:
                 otimizador.load_state_dict(data["otimizador"])
             epsilon = float(data.get("epsilon", EPSILON_INICIAL))
-            media   = float(data.get("media_recompensa", 0.0))
+            media = float(data.get("media_recompensa", 0.0))
         else:
-            # caso seja state_dict puro
             modelo.load_state_dict(data, strict=False)
 
-        # — mescla memória simbiótica (se existir)
+        # --- restaura memória simbiótica ---
         mem_path = SAVE_PATH + ".mem"
         if os.path.exists(mem_path):
             with open(mem_path, "rb") as f:
@@ -78,11 +95,17 @@ def carregar_estado(modelo, otimizador):
                 if isinstance(mem_data, list):
                     memoria.extend(mem_data[-MEMORIA_MAX:])
 
+        # --- detecção simbiótica de reset (autorreparo) ---
+        if len(memoria) == 0 and media < -500 and epsilon <= 0.06:
+            print("⚡ Memória vazia detectada com baixa média — regenerando aprendizado simbiótico.")
+            epsilon = 1.0  # reinicia exploração
+            media = 0.0
+
         print(f"🧬 Estado restaurado: ε={epsilon:.3f} | média={media:.2f} | memória={len(memoria)}")
 
     except Exception as e:
         print(f"⚠️ Erro ao carregar estado ({type(e).__name__}): {e}")
-        print("🔄 Iniciando com pesos atuais e memória vazia (modo evolutivo segue).")
+        print("🔄 Reiniciando com pesos atuais e memória limpa (modo evolutivo segue).")
         memoria = deque(maxlen=MEMORIA_MAX)
         epsilon, media = EPSILON_INICIAL, 0.0
 

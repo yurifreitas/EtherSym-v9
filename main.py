@@ -1,12 +1,18 @@
 # ==========================================
-# 🌌 EtherSym v9 — Turbo Dueling DQN Simbiótico
+# 🌌 EtherSym v9 — Turbo Dueling DQN Simbiótico (MAIN COMPLETO LIMPO)
 # ==========================================
 
-import sys, random, pygame, numpy as np, torch
-from torch.amp import GradScaler, autocast      # ✅ nova API PyTorch ≥ 2.6
+import os, sys, random, numpy as np, pygame, torch
+from torch.amp import GradScaler, autocast  # PyTorch ≥ 2.6
 
-from config import *
-from utils import reseed, warmup
+from config import (
+    LARGURA, ALTURA, FPS, FAST_MODE, RENDER_INTERVAL,
+    STEPS_PER_RENDER, ACTION_REPEAT, LOG_INTERVAL, AUTOSAVE_EVERY,
+    BATCH, GAMMA, EPSILON_INICIAL, EPSILON_DECAY, EPSILON_MIN,
+    N_STEP, TARGET_TAU, TARGET_SYNC_HARD, SAVE_PATH, MIN_REPLAY,
+    MEMORIA_MAX
+)
+from utils import warmup
 from field import GravidadeAstrofisica
 from physics.flappy_env import AmbienteFlappy
 from memory import salvar_estado, carregar_estado
@@ -14,23 +20,50 @@ from network import criar_modelo
 from replay import RingReplay, NStepBuffer
 
 # ========================
-# 🪟 Inicialização da janela
-# ========================
-pygame.init()
-pygame.font.init()
-DISPLAY_FLAGS = pygame.DOUBLEBUF | pygame.HWSURFACE | pygame.SCALED
-try:
-    TELA = pygame.display.set_mode((LARGURA, ALTURA), DISPLAY_FLAGS, vsync=1)
-except Exception:
-    TELA = pygame.display.set_mode((LARGURA, ALTURA), DISPLAY_FLAGS)
-pygame.display.set_caption("🌌 EtherSym v9 — Turbo Dueling DQN")
-clock = pygame.time.Clock()
-pygame.event.set_allowed([pygame.QUIT, pygame.KEYDOWN, pygame.KEYUP])
-
-# ========================
-# ⚙️ Modelo e memória
+# 🔧 Turbo CUDA / determinismo suave
 # ========================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.fp32_precision = "tf32"  # ✅ nova forma recomendada
+torch.backends.cudnn.allow_tf32 = True
+try:
+    torch.set_num_threads(1)
+except Exception:
+    pass
+
+def reseed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    print(f"🌱 RNG reseed com seed={seed}")
+
+reseed(42)
+
+# ========================
+# 🪟 Inicialização da janela (headless opcional)
+# ========================
+if os.environ.get("HEADLESS", "0") == "1":
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+
+pygame.init()
+pygame.font.init()
+
+DISPLAY_FLAGS = pygame.DOUBLEBUF | pygame.HWSURFACE
+try:
+    TELA = pygame.display.set_mode((LARGURA, ALTURA), DISPLAY_FLAGS, vsync=0)
+except Exception:
+    TELA = pygame.display.set_mode((LARGURA, ALTURA), DISPLAY_FLAGS)
+
+pygame.display.set_caption("🌌 EtherSym v9 — Turbo Dueling DQN (Treino)")
+clock = pygame.time.Clock()
+pygame.event.set_allowed([pygame.QUIT])
+
+# ========================
+# 🧠 Modelo / alvo / opt / loss
+# ========================
 modelo, alvo, opt, loss_fn = criar_modelo(device)
 alvo.eval()
 modelo.train(True)
@@ -46,26 +79,26 @@ except Exception:
 # GradScaler (nova API)
 scaler = GradScaler(device="cuda", enabled=(device.type == "cuda"))
 
-try:
-    torch.set_float32_matmul_precision("high")
-except Exception:
-    pass
-
-# Estado salvo
+# Carrega estado salvo (incremental)
 _legacy_mem, EPSILON, media_recompensa = carregar_estado(modelo, opt)
 if EPSILON is None:
     EPSILON = EPSILON_INICIAL
+print(f"🌱 Evoluindo modelo existente | ε={EPSILON:.3f} | média_antiga={float(media_recompensa or 0):.2f}")
 
-# Buffer de replay
-replay = RingReplay(state_dim=6, capacity=MEMORIA_MAX, device=device)
-
+# ========================
+# 🌌 Ambiente e buffers
+# ========================
 campo = GravidadeAstrofisica()
 env   = AmbienteFlappy()
+
 ACTIONS = np.array([-1, 0, 1], dtype=np.int8)
 def a_to_index(a): return int(a + 1)
 
+replay = RingReplay(state_dim=6, capacity=MEMORIA_MAX, device=device)
+nstep_helper = NStepBuffer(N_STEP, GAMMA)
+
 # ========================
-# 🔮 Política de ação
+# 🔮 Política (ε-greedy + temperatura)
 # ========================
 TEMPERATURA_BASE = 0.95
 TEMPERATURA_MIN  = 0.60
@@ -77,8 +110,7 @@ def escolher_acao(estado):
     with torch.no_grad():
         x = torch.tensor(estado, dtype=torch.float32, device=device).unsqueeze(0)
         logits = modelo(x)
-        temp = max(TEMPERATURA_MIN,
-                   TEMPERATURA_BASE * (0.8 + 0.2 * (EPSILON / max(EPSILON_MIN, EPSILON))))
+        temp = max(TEMPERATURA_MIN, TEMPERATURA_BASE * (0.8 + 0.2 * (EPSILON / max(EPSILON_MIN, EPSILON))))
         probs = torch.softmax(logits / temp, dim=1).float().clamp(1e-6, 1.0)
         probs = (probs / probs.sum(dim=1, keepdim=True)).cpu().numpy().ravel()
         return int(np.random.choice(ACTIONS, p=probs))
@@ -100,13 +132,16 @@ def step_repetido(env, acao, campo, repeats=ACTION_REPEAT):
 # ========================
 # 🚀 Loop principal
 # ========================
-estado = warmup(env, campo)
+try:
+    estado = warmup(env, campo)
+except Exception:
+    estado = env.reset()
+
 total_recompensa = 0.0
 epoch = 0
 recompensas = []
 global_step = 0
 hard_sync_step = 0
-nstep_helper = NStepBuffer(N_STEP, GAMMA)
 running = True
 
 print("🚀 Iniciando Treinamento Turbo Simbiótico...")
@@ -168,11 +203,11 @@ while running:
 
             taxa_poda = 0.0
             if epoch % 2 == 0:
-                taxa_poda = modelo.aplicar_poda(
-                    limiar_base=max(0.0005, 0.004 * (1 - EPSILON))
-                )
-                modelo.regenerar_sinapses(taxa_poda)
-
+                try:
+                    taxa_poda = modelo.aplicar_poda(limiar_base=max(0.0005, 0.004 * (1 - EPSILON)))
+                    modelo.regenerar_sinapses(taxa_poda)
+                except AttributeError:
+                    pass
             try:
                 modelo.verificar_homeostase(media_recompensa)
             except AttributeError:
@@ -186,7 +221,6 @@ while running:
                 )
 
             salvar_estado(modelo, opt, [], EPSILON, media_recompensa)
-            reseed()
             estado = env.reset()
             total_recompensa = 0.0
             epoch += 1
@@ -194,26 +228,21 @@ while running:
     # ===== Renderização =====
     if not FAST_MODE:
         if RENDER_INTERVAL <= 1:
-            env.render(campo)
-            pygame.display.flip()
-            clock.tick(FPS)
+            env.render(campo); pygame.display.flip(); clock.tick(FPS or 0)
         elif (global_step % RENDER_INTERVAL) == 0:
-            env.render(campo)
-            pygame.display.flip()
+            env.render(campo); pygame.display.flip()
     else:
         if RENDER_INTERVAL > 0 and (global_step % RENDER_INTERVAL) == 0:
-            env.render(campo)
-            pygame.display.flip()
+            env.render(campo); pygame.display.flip()
 
 # ========================
 # Encerramento
 # ========================
 try:
-    TELA.fill((0, 0, 0))
-    pygame.display.flip()
+    TELA.fill((0, 0, 0)); pygame.display.flip()
 except Exception:
     pass
 salvar_estado(modelo, opt, [], EPSILON, locals().get("media_recompensa", 0.0))
-pygame.time.delay(150)
+pygame.time.delay(100)
 pygame.quit()
 sys.exit(0)

@@ -1,79 +1,62 @@
 # ==========================================
-# 🌌 Flappy EtherSym Turbo Trainer v9.6 — Estável & Evolutivo
-# ==========================================
-# Compatível com: main_train_evolutivo.py / main_watch.py
-# Nunca precisa mudar entre versões — o sistema se adapta.
+# 🌌 Flappy EtherSym — Turbo Trainer v9.7 (modo legado ultra-rápido)
 # ==========================================
 
-# --- Mundo físico ---
 LARGURA = 400
 ALTURA = 600
-CHAO = ALTURA - 80              # base simbólica do chão (visual)
+CHAO = ALTURA - 80
 
-# --- Gravidade simbiótica ---
+# --- Gravidade simbiótica intensa ---
 GRAVIDADE_BASE = 2.4
 OSCILACAO_FREQUENCIA = 1.8
 OSCILACAO_AMPLITUDE = 0.9
 
-# --- Dinâmica ---
-VELOCIDADE_CANO_BASE = 9.0
-DISTANCIA_CANO_BASE = 340
-GAP_VERTICAL_MIN = 150
-GAP_VERTICAL_MAX = 230
-VELOCIDADE_PULO = -11.0
-VELOCIDADE_DESCIDA = 8.5
+# --- Dinâmica rápida ---
+VELOCIDADE_CANO_BASE = 7.5
+DISTANCIA_CANO_BASE = 380
+GAP_VERTICAL_MIN = 180
+GAP_VERTICAL_MAX = 240
+VELOCIDADE_PULO = -10.5
+VELOCIDADE_DESCIDA = 8.0
 
 # ==========================================
-# 🤖 Treinamento por Reforço
+# 🤖 Reforço
 # ==========================================
 EPOCHS = 10000
-BATCH = 128
+BATCH = 64
 GAMMA = 0.99
 EPSILON_INICIAL = 1.0
-EPSILON_DECAY = 0.9982
+EPSILON_DECAY = 0.9985
 EPSILON_MIN = 0.05
-LR = 0.0009
+LR = 0.0007
 
-# Target Network
-TARGET_TAU = 0.015
-TARGET_SYNC_HARD = 2500
-
-# ==========================================
-# 💾 Replay Buffer
-# ==========================================
-MEMORIA_MAX = 500_000
-MIN_REPLAY  = 8000
-N_STEP = 5  # aprendizado de longo prazo
+TARGET_TAU = 0.02
+TARGET_SYNC_HARD = 2000
 
 # ==========================================
-# ⚙️ Execução e Coleta
+# 💾 Replay
+# ==========================================
+MEMORIA_MAX = 200_000
+MIN_REPLAY  = max(BATCH * 5, 4000)
+N_STEP = 3
+
+# ==========================================
+# ⚙️ Execução rápida
+# ==========================================
+# ==========================================
+# ⚙️ Execução rápida
 # ==========================================
 FAST_MODE        = True
-STEPS_PER_RENDER = 32
-ACTION_REPEAT    = 6
-LOG_INTERVAL     = 2000
-AUTOSAVE_EVERY   = 30000
+STEPS_PER_RENDER = 8
+EPSILON_MIN = 0.08          # 🔁 permite leve exploração contínua
+ACTION_REPEAT = 5            # 🔧 reduz sobrecarga de decisões
+LOG_INTERVAL = 200           # 🧭 frequência de logs no terminal
+AUTOSAVE_EVERY = 15000       # 💾 menos I/O, mais GPU
+RENDER_INTERVAL = 0          # 🚀 modo turbo total (sem render)
+FPS = 0
 
-# ==========================================
-# 🖥️ Renderização (visualização)
-# ==========================================
-RENDER_INTERVAL = 0   # 0 = modo turbo (sem render)
-FPS = 0               # 0 = ilimitado
-# 💡 Defina RENDER_INTERVAL=1000 para visualizar enquanto treina
-
-# ==========================================
-# 🌱 Modo Evolutivo
-# ==========================================
-EVOLUTIVO = True          # True = continua sempre do último estado
-CHECKPOINT_VERSIONS = 10  # quantos checkpoints manter antes de apagar os antigos
 
 # ==========================================
 # 📂 Caminhos
 # ==========================================
 SAVE_PATH = "estado_treinamento.pth"
-
-# ==========================================
-# 🧩 Compatibilidade garantida
-# ==========================================
-# Estes campos são usados pelos módulos de memória e rede.
-# Nunca altere seus nomes; apenas ajuste valores se necessário.
